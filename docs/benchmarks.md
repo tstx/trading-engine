@@ -15,6 +15,44 @@ cmake --preset release && cmake --build --preset release
 The benchmark binary also builds in the `debug` and `asan-ubsan` presets (useful as a smoke
 test, e.g. `--benchmark_min_time=1x`), but numbers are only meaningful from `release`.
 
+Since stage 3 every benchmark exists once per book variant, e.g. `BM_MixedFlow<Map>`,
+`BM_MixedFlow<Vector>`, `BM_MixedFlow<Tick>`; select a subset with e.g.
+`--benchmark_filter='<Tick>'`. One full run takes ~8 minutes.
+
+### Measurement protocol (stage 3 and later)
+
+This is the exact procedure used for the stage-3 numbers below. Run it on a quiet machine
+(no parallel builds; the load average is recorded before and after every run) from the
+repository root:
+
+```sh
+cmake --preset release && cmake --build --preset release
+out=bench-results/$(git rev-parse --short HEAD); mkdir -p "$out"
+for i in 1 2 3; do
+    uptime > "$out/load_$i.txt"
+    ./build/release/engine_bench --benchmark_repetitions=5 --benchmark_report_aggregates_only=true \
+        --benchmark_out="$out/run_$i.json" --benchmark_out_format=json > "$out/run_$i.txt"
+    uptime >> "$out/load_$i.txt"
+done
+cat "$out"/load_*.txt
+# median over the 3 runs of each run's median (range = min..max of the 3 run medians)
+python3 - "$out"/run_*.json <<'EOF'
+import json, statistics, sys, collections
+keys = ["items_per_second", "p50_ns", "p90_ns", "p99_ns", "p99.9_ns", "max_ns"]
+v = collections.defaultdict(lambda: collections.defaultdict(list))
+for path in sys.argv[1:]:
+    for b in json.load(open(path))["benchmarks"]:
+        if b.get("aggregate_name") == "median":
+            for k in keys:
+                if k in b:
+                    v[b["run_name"]][k].append(b[k])
+for name, d in v.items():
+    print(name, " ".join(f"{k}={statistics.median(x):.4g}[{min(x):.4g}..{max(x):.4g}]" for k, x in d.items()))
+EOF
+```
+
+If the load average is above ~2 during a run, repeat that run.
+
 ## Methodology
 
 **Order flow** (`bench/order_flow.hpp`). All commands are generated up front into a
@@ -183,3 +221,159 @@ Concrete hypotheses, in order of expected impact:
    scattered nodes outgrowing L1/L2. Dense `SymbolId` → vector index and intrusive/pooled
    orders should reduce misses. (The three virtual `EventSink` calls per trade are cheap
    with a `NullSink` and are not a hotspot here.)
+
+## Stage 3 results (PRELIMINARY)
+
+> **Preliminary.** Measured on 2026-10-17 on `2d0674a` (allocation-free hot path merged)
+> plus the stage-3 benchmark changes. **3 full runs x 5 repetitions**, median of the per-run
+> medians, [min–max of the 3 run medians]; load average 1.0–1.4 during all runs. The final
+> measurement will be repeated with the protocol under "How to run". As a control, the
+> unchanged **stage-1 binary** (`54d1654`) was re-run **once** (5 repetitions) in the same
+> session (load ~1.0): it was within ±10 % of the documented baseline, so the comparison
+> below is against both.
+
+### What changed in the benchmarks
+
+- Every baseline benchmark is a template over the three book variants
+  (`Map` = `std::map` levels, `Vector` = sorted vector, `Tick` = tick-indexed array). Flows,
+  batch sizes and warmups are **unchanged**, so `BM_X/...` (stage 1) and `BM_X<V>/...` are
+  directly comparable.
+- Each engine gets an `EngineConfig` derived from its flow (`size_config()` in
+  `bench/matching_bench.cpp`, by replaying the flow once at generation time):
+  `order_capacity` = peak of simultaneously live orders + 25 %, `id_capacity` = number of NEW
+  orders over the engine's lifetime, `level_capacity` = max. distinct prices per symbol and
+  side, `symbol_capacity` >= symbols. All flow prices lie inside the default tick band
+  (max. price ~35 000 in the sweep ladder < 131 072), so `max_tick_price` stays at its default.
+  A flow that produces any reject aborts the benchmark.
+- New flow `generate_cancel_modify_flow()` (`bench/order_flow.hpp`): per command ~50 % NEW
+  (same price/quantity model as the mixed flow, 10 % MARKET), ~35 % CANCEL, ~15 % MODIFY of a
+  uniformly chosen resting order (half re-quotes to a new passive price with priority loss,
+  half quantity reductions keeping priority). The cancels carry most of the outflow; a
+  small proportional controller on the opposite side's order count (`cross_ratio` 0.06)
+  keeps the book at ~`target_resting` orders per side. Measured mix: 50.0 / 35.0 / 14.9 %,
+  ~0.15 trades per command, 0 rejects, 51/86/102 price levels for 100/1 000/10 000 resting.
+  Benchmarks: `BM_CancelModifyFlow<V>/resting:{100,1000,10000}` (throughput, items =
+  commands) and `BM_LatencyCancelModify<V>/resting:{1000,10000}`.
+
+### Throughput (orders/s)
+
+| Benchmark | Stage 1 (doc) | Stage 1 (re-run) | Map | Vector | Tick |
+|---|---:|---:|---:|---:|---:|
+| `PassiveInsert/levels:10` | 10.8 M | 11.1 M | 6.7 M | 6.5 M | 6.5 M |
+| `PassiveInsert/levels:100` | 9.5 M | 9.9 M | 6.4 M | 5.8 M | 6.7 M |
+| `PassiveInsert/levels:1000` | 6.8 M | 7.3 M | 5.7 M | 5.1 M | 6.6 M |
+| `MixedFlow/resting:100` | 9.6 M | 9.7 M | 6.2 M | 7.2 M | **7.5 M** |
+| `MixedFlow/resting:1000` | 9.0 M | 8.2 M | 6.1 M | **7.2 M** | 6.7 M |
+| `MixedFlow/resting:10000` | 7.5 M | 7.8 M | 5.4 M | **6.4 M** | 6.3 M |
+| `MixedFlowSymbols/symbols:1` | 9.5 M | 9.7 M | 6.2 M | **13.7 M** [7.7–16.4] | 8.7 M [7.6–16.0] |
+| `MixedFlowSymbols/symbols:10` | 7.3 M | 7.8 M | 6.3 M | **11.5 M** [7.6–13.1] | 8.5 M [6.7–9.8] |
+| `MixedFlowSymbols/symbols:100` | 3.6 M | 4.6 M | 4.5 M | **6.2 M** | 5.6 M |
+| `AggressiveSweep/levels:1` (sweeps/s) | 4.1 M | 4.5 M | 3.0 M [2.4–4.0] | 3.1 M | 3.2 M |
+| `AggressiveSweep/levels:10` | 385 k | 410 k | 320 k | 400 k | 410 k |
+| `AggressiveSweep/levels:50` | 72 k | 80 k | 60 k | 80 k | 90 k |
+| `CancelModifyFlow/resting:100` (new) | – | – | 13.0 M | 13.6 M | **15.8 M** |
+| `CancelModifyFlow/resting:1000` (new) | – | – | 12.4 M | 12.8 M | **14.1 M** |
+| `CancelModifyFlow/resting:10000` (new) | – | – | 10.3 M | 10.5 M | **11.7 M** |
+
+### Latency per command (includes ~20 ns clock overhead)
+
+| Benchmark | Variant | p50 | p90 | p99 | p99.9 | max |
+|---|---|---:|---:|---:|---:|---:|
+| `LatencyMixed/resting:1000` | Stage 1 (doc / re-run) | 140 / 100 ns | 280 / 180 ns | 540 / 300 ns | 1.0 µs / 490 ns | 3.5 / 2.0 ms |
+| | Map | 150 ns | 250 ns | 500 ns | 670 ns | 177 µs |
+| | Vector | 150 ns | 230 ns | 490 ns | 650 ns | 100 µs |
+| | Tick | 140 ns | 220 ns | 480 ns | 630 ns | 139 µs |
+| `LatencyMixed/resting:10000` | Stage 1 (doc / re-run) | 150 / 110 ns | 440 / 220 ns | 970 / 450 ns | 2.2 µs / 760 ns | 0.3 ms / 46 µs |
+| | Map | 190 ns | 320 ns | 590 ns | 820 ns | 171 µs |
+| | Vector | 170 ns | 280 ns | 560 ns | 770 ns | 163 µs |
+| | Tick | 170 ns | 280 ns | 550 ns | 760 ns | 127 µs |
+| `LatencyPassive/levels:100` | Stage 1 (doc / re-run) | 90 / 90 ns | 110 / 100 ns | 160 / 140 ns | 330 / 210 ns | 6.0 / 3.6 ms |
+| | Map | 190 ns | 280 ns | 570 ns | 730 ns | 146 µs |
+| | Vector | 200 ns | 290 ns | 580 ns | 740 ns | 174 µs |
+| | Tick | 200 ns | 300 ns | 590 ns | 750 ns | 210 µs |
+| `LatencyCancelModify/resting:1000` (new) | Map | 90 ns | 160 ns | 400 ns | 570 ns | 160 µs |
+| | Vector | 80 ns | 160 ns | 400 ns | 550 ns | 156 µs |
+| | Tick | **60 ns** | 140 ns | 380 ns | 530 ns | 123 µs |
+| `LatencyCancelModify/resting:10000` (new) | Map | 120 ns | 210 ns | 470 ns | 630 ns | 130 µs |
+| | Vector | 120 ns | 200 ns | 470 ns | 630 ns | 157 µs |
+| | Tick | 110 ns | 180 ns | 440 ns | 600 ns | 99 µs |
+
+Noise: the coefficient of variation of the repetitions was mostly 2–8 %, but up to 20–28 %
+for `MixedFlowSymbols<Tick>`, `CancelModifyFlow<Tick>/resting:100` and the sweeps, and some
+benchmarks are bimodal between runs (`MixedFlowSymbols<Vector>/symbols:1`: 7.7 vs 16.4 M).
+Differences below ~15 % between variants should not be over-interpreted.
+
+### Findings
+
+1. **The tail is fixed.** `max` dropped from 0.3–6 ms (stage 1) to 100–210 µs for all
+   variants, and p99.9 of the 10 000-resting mixed flow from 2.2 µs to ~0.8 µs. A quick A/B
+   with the *default* `EngineConfig` (not sized to the flow) on `LatencyPassive<Tick>` gave
+   p99 1.85 µs, p99.9 3.4 µs and max 8.4 ms vs. 0.6 µs / 0.8 µs / 0.3 ms with the sized
+   config — this confirms the stage-1 hypothesis that the ms outliers come from rehashing
+   (`known_ids_` beyond 2^17) and pool growth.
+2. **The median and throughput got worse, independent of the book variant.** Throughput is
+   20–40 % below stage 1 in `PassiveInsert` and `MixedFlow`, and `LatencyPassive` p50 went from
+   90 ns to ~200 ns for *all three* variants. Since all variants are affected equally, the
+   cause is not the level structure. Root cause (verified by experiment): **cache/TLB
+   locality of `FlatHashMap`/`FlatHashSet`**. `std::hash<uint64_t>` is the identity, so the
+   stage-1 `unordered_set`/`unordered_map` touched their buckets *sequentially* for the
+   sequential order IDs of all flows. `flat_hash_home()` uses Fibonacci hashing, which
+   deliberately scatters consecutive IDs over the whole table — with flow-sized tables
+   (`known_ids_` 4 MiB, `live_orders_` 8 MiB for 200k orders) every NEW costs 2–3
+   random cache + TLB misses (expensive in a VM). The latency harness serializes around every
+   call, so these misses show up fully in p50.
+   - Experiment (scratch build, not committed): with an identity hash (`home = key & mask`) the
+     same benchmarks reach `PassiveInsert<Tick>` 38–54 M/s, `MixedFlow` 15–25 M/s,
+     `CancelModifyFlow` 25–39 M/s and p50 30–70 ns, i.e. **2–5x faster than stage 1**.
+   - But identity hashing with linear probing is **not** a fix: in `AggressiveSweep` the
+     100 000 sequential IDs form one contiguous cluster and every backward-shift erase scans
+     it, so the sweeps collapsed to < 10 k/s (O(n²)).
+   - Suggestion for the engine (not part of this change): a home function that keeps
+     consecutive IDs close (e.g. scatter only blocks of 8–64 IDs) or a separate structure for
+     `known_ids_` (high-water mark + bitmap of recent IDs, as proposed in stage 1).
+     Page faults in the freshly `mmap`ed pool are a minor factor (glibc tunables
+     `mmap_threshold`/`trim_threshold` changed little).
+3. **Variants:** Vector and Tick both beat Map in all matching flows (+10–25 %), Map is
+   only competitive in pure passive insertion with few levels. Tick is best where levels are
+   created/removed a lot (`CancelModifyFlow` +10–15 % over Vector, `PassiveInsert/1000`
+   +30 %, `LatencyCancelModify` p50 60 vs 80 ns) and in the experiment build (where the hash
+   noise is gone) it leads clearly in passive insertion. Vector is best with many symbols
+   (`symbols:100` 6.2 vs 5.6 M; in the experiment build 14.4 vs 11.6 M): each Tick book holds
+   two 1 MiB slot arrays plus bitmaps, which pollutes the cache with 100 books. Vector's
+   weakness is deep books (insertion into the middle shifts pointers: `PassiveInsert/1000`
+   5.1 M vs Tick 6.6 M).
+
+### Assessment against NFR-7 (preliminary)
+
+| Target | Requirement | Stage 3 (best variant, mixed / cancel-modify flow) | Status |
+|---|---|---|---|
+| Throughput | > 1 M orders/s | 6.3–7.5 M (mixed), 11.7–15.8 M commands/s (cancel/modify), 5.6–6.2 M with 100 symbols | met, 5–15x headroom |
+| Latency p50 | < 1 µs | 60–200 ns | met |
+| Latency p99 | < 5 µs | 0.38–0.59 µs | met |
+
+All variants meet NFR-7 by a wide margin, and NFR-6 (no allocation in the hot path, Vector
+and Tick) now also holds with a correctly sized `EngineConfig`. Relative to stage 1, stage 3
+so far trades median/throughput for a much better tail; the hash locality issue (finding 2)
+should be addressed before the final measurement.
+
+### Recommendation for the default (`using OrderBook = ...` in `order_book.hpp`)
+
+**`VectorOrderBook` as default; `TickOrderBook` as opt-in** for instruments with a known,
+narrow price band.
+
+- Vector is within ~0–15 % of Tick in every single-symbol flow, best with many symbols,
+  allocation-free within `level_capacity`, and has **no semantic restriction**: any positive
+  price is accepted, as in stage 1 and the protocol.
+- Tick is the fastest variant for level churn and passive insertion, but has real costs as
+  a default: (a) **price band** — only prices `1..max_tick_price` (default 131 072 ticks) are
+  accepted, anything above is rejected with `INVALID_PRICE`, which is a visible behaviour
+  change for clients (e.g. a price of 2 000.00 at tick 0.001 is already out of band); a
+  moving band (offset) or per-instrument band configuration would be needed; (b) **memory
+  per symbol** — ~2 MiB of slot arrays per book at the default band (zeroed in
+  `add_symbol`), 128 MiB for 64 symbols, and the resulting cache pressure shows in
+  `MixedFlowSymbols/symbols:100`.
+- Map should remain only as a reference: it is the slowest variant and is not NFR-6
+  compliant (one node allocation per new price level).
+
+The final decision should be confirmed by the final measurement (after the hash locality
+fix, if any), since finding 2 currently masks part of the differences between the variants.

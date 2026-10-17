@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <random>
+#include <unordered_map>
 #include <vector>
 
 #include "engine/event_sink.hpp"
@@ -197,6 +198,186 @@ inline std::vector<engine::Command> generate_ask_ladder(engine::Price levels, st
                 .quantity = qty,
             });
         }
+    }
+    return out;
+}
+
+// Stufe 3: realistischer Fluss mit CANCEL und MODIFY. Je Command wird gewürfelt:
+// ~new_ratio NEW (wie generate_order_flow: ~market_ratio MARKET, LIMIT-Preise geometrisch um den
+// Mittelpreis), ~cancel_ratio CANCEL, Rest MODIFY. CANCEL und MODIFY treffen eine gleichverteilt
+// gewählte, zu diesem Zeitpunkt noch liegende Order (Buchführung über eine Schatten-Engine, die
+// Commands sind also immer gültig; ist das Buch leer, wird stattdessen eine NEW-Order erzeugt).
+// MODIFY: modify_reprice_ratio Neu-Quotierung (neuer passiver Preis relativ zum aktuellen
+// Mittelpreis und neue Menge, Prioritätsverlust), sonst Mengenreduktion bei gleichem Preis
+// (Position bleibt).
+//
+// Stationarität: Das Buch wird im Wesentlichen durch die Cancels abgebaut; der Anteil
+// kreuzender LIMITs folgt wie in generate_order_flow der ruhenden Gegenseite, hier aber über die
+// ANZAHL liegender Orders (Soll: target_resting je Seite und Symbol) und mit kleinem
+// Grundanteil (cross_ratio), weil Cancels den Großteil des Abflusses tragen. Typisch für echte
+// Märkte: viele Nachrichten, wenige Trades.
+struct CancelModifyFlowConfig {
+    OrderFlowConfig base{.count = 100'000, .seed = 0x5EED'0003, .cross_ratio = 0.06};  // count = Commands gesamt
+    double cancel_ratio = 0.35;
+    double modify_ratio = 0.15;  // NEW = 1 - cancel_ratio - modify_ratio
+    double modify_reprice_ratio = 0.5;
+};
+
+inline std::vector<engine::Command> generate_cancel_modify_flow(const CancelModifyFlowConfig& cmcfg) {
+    const OrderFlowConfig& cfg = cmcfg.base;
+
+    struct Live {
+        engine::OrderId id;
+        engine::SymbolId symbol;
+        engine::Side side;
+        engine::Price price;
+        engine::Quantity remaining;
+        engine::Quantity filled;
+    };
+
+    // Buchführung der liegenden Orders: dichter Vektor (gleichverteilte Auswahl in O(1)) plus
+    // Index id -> Position (Swap-Remove). Nur Lookups, keine Iteration über die Hash-Map:
+    // deterministisch.
+    class Book final : public engine::EventSink {
+    public:
+        explicit Book(std::uint32_t symbols) : count_(symbols) {}
+        void on_ack(engine::OrderId, engine::SeqNo) override {}
+        void on_reject(engine::OrderId, engine::RejectReason) override { ++rejects_; }
+        void on_trade(const engine::Trade& t) override { aggressor_traded_ += t.quantity; }
+        void on_fill(engine::OrderId id, engine::Quantity qty, engine::Quantity remaining) override {
+            auto it = index_.find(id);
+            if (it == index_.end()) {
+                return;  // Aggressor einer NEW-Order, noch nicht liegend
+            }
+            Live& o = live_[it->second];
+            o.filled += qty;
+            o.remaining = remaining;
+            if (remaining == 0) {
+                remove(id);
+            }
+        }
+        void on_cancelled(engine::OrderId id, engine::Quantity, engine::CancelReason) override { remove(id); }
+
+        void add(const Live& o) {
+            index_.emplace(o.id, live_.size());
+            live_.push_back(o);
+            ++count_[o.symbol][static_cast<std::size_t>(o.side)];
+        }
+        void remove(engine::OrderId id) {
+            auto it = index_.find(id);
+            if (it == index_.end()) {
+                return;
+            }
+            const std::size_t pos = it->second;
+            --count_[live_[pos].symbol][static_cast<std::size_t>(live_[pos].side)];
+            index_.erase(it);
+            if (pos + 1 != live_.size()) {
+                live_[pos] = live_.back();
+                index_[live_[pos].id] = pos;
+            }
+            live_.pop_back();
+        }
+
+        std::vector<Live> live_;
+        std::unordered_map<engine::OrderId, std::size_t> index_;
+        std::vector<std::array<std::size_t, 2>> count_;  // liegende Orders je Symbol und Seite
+        engine::Quantity aggressor_traded_ = 0;
+        std::size_t rejects_ = 0;
+    };
+
+    std::mt19937_64 rng(cfg.seed);
+    Book shadow(cfg.symbols);
+    engine::MatchingEngine book(shadow);
+    for (engine::SymbolId s = 0; s < cfg.symbols; ++s) {
+        book.add_symbol(s);
+    }
+    std::vector<engine::Price> mids(cfg.symbols, cfg.mid_price);
+    const auto current_mid = [&](engine::SymbolId symbol) {
+        const engine::BookSnapshot top = book.snapshot(symbol, 1);
+        engine::Price& mid = mids[symbol];
+        if (!top.bids.empty() && !top.asks.empty()) {
+            mid = (top.bids.front().price + top.asks.front().price) / 2;
+        }
+        return mid;
+    };
+    const auto passive_price = [&](engine::Side side, engine::Price mid) {
+        const engine::Price d = 1 + detail::offset(rng, cfg.mean_offset, cfg.max_offset - 1);
+        return std::max<engine::Price>(side == engine::Side::Buy ? mid - d : mid + d, 1);
+    };
+
+    std::vector<engine::Command> out;
+    out.reserve(cfg.count);
+    engine::OrderId next_id = cfg.first_id;
+    for (std::size_t i = 0; i < cfg.count; ++i) {
+        const double kind = detail::unit(rng);
+        const bool cancel = kind < cmcfg.cancel_ratio;
+        const bool modify = !cancel && kind < cmcfg.cancel_ratio + cmcfg.modify_ratio;
+
+        if ((cancel || modify) && !shadow.live_.empty()) {
+            const Live o = shadow.live_[detail::uniform(rng, 0, shadow.live_.size() - 1)];
+            engine::Command cmd;
+            if (cancel) {
+                cmd = engine::CancelOrder{.id = o.id};
+            } else if (o.remaining < 2 || detail::unit(rng) < cmcfg.modify_reprice_ratio) {
+                const engine::Price price = passive_price(o.side, current_mid(o.symbol));
+                const engine::Quantity qty = detail::uniform(rng, cfg.min_qty, cfg.max_qty);
+                cmd = engine::ModifyOrder{.id = o.id, .new_price = price, .new_quantity = o.filled + qty};
+            } else {
+                const engine::Quantity rest = detail::uniform(rng, 1, o.remaining - 1);
+                cmd = engine::ModifyOrder{.id = o.id, .new_price = o.price, .new_quantity = o.filled + rest};
+            }
+            book.process(cmd);
+            if (const auto* m = std::get_if<engine::ModifyOrder>(&cmd)) {
+                auto it = shadow.index_.find(m->id);
+                if (it != shadow.index_.end()) {  // nicht vollständig gefüllt
+                    Live& l = shadow.live_[it->second];
+                    l.price = m->new_price;
+                    l.remaining = m->new_quantity - l.filled;
+                }
+            }
+            out.push_back(cmd);
+            continue;
+        }
+
+        const auto symbol =
+            static_cast<engine::SymbolId>(cfg.symbols > 1 ? detail::uniform(rng, 0, cfg.symbols - 1) : 0);
+        const engine::Price mid = current_mid(symbol);
+
+        engine::NewOrder order{};
+        order.id = next_id++;
+        order.symbol = symbol;
+        order.side = (rng() & 1U) != 0 ? engine::Side::Buy : engine::Side::Sell;
+        order.quantity = detail::uniform(rng, cfg.min_qty, cfg.max_qty);
+        const bool buy = order.side == engine::Side::Buy;
+
+        if (detail::unit(rng) < cfg.market_ratio) {
+            order.type = engine::OrderType::Market;
+            order.price = 0;
+        } else {
+            order.type = engine::OrderType::Limit;
+            const auto opposite = static_cast<std::size_t>(buy ? engine::Side::Sell : engine::Side::Buy);
+            const double fill_level =
+                static_cast<double>(shadow.count_[symbol][opposite]) / static_cast<double>(cfg.target_resting);
+            const double p_cross = std::min(0.95, cfg.cross_ratio * fill_level);
+            if (detail::unit(rng) < p_cross) {
+                const engine::Price d = detail::offset(rng, cfg.cross_mean_offset, cfg.max_offset);
+                order.price = std::max<engine::Price>(buy ? mid + d : mid - d, 1);
+            } else {
+                order.price = passive_price(order.side, mid);
+            }
+        }
+
+        shadow.aggressor_traded_ = 0;
+        book.process(order);
+        if (order.type == engine::OrderType::Limit && shadow.aggressor_traded_ < order.quantity) {
+            shadow.add(Live{.id = order.id,
+                            .symbol = symbol,
+                            .side = order.side,
+                            .price = order.price,
+                            .remaining = order.quantity - shadow.aggressor_traded_,
+                            .filled = shadow.aggressor_traded_});
+        }
+        out.emplace_back(order);
     }
     return out;
 }
