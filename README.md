@@ -53,9 +53,7 @@ order 2. Trades execute at the resting price; the 102.00 level is never touched.
 
 - [x] Stage 0: scaffolding — CMake presets, GoogleTest, CI (GCC/Clang x debug/ASan+UBSan/TSan),
   clang-format, clang-tidy, interfaces and stubs.
-- [ ] Stage 1: core matching (LIMIT/MARKET), text parser, CLI — in progress.
+- [x] Stage 1: core matching (LIMIT/MARKET), text parser, CLI, unit and replay tests.
 - [ ] Stage 2: concurrency (lock-free MPSC input, SPSC event output).
 - [ ] Stage 3: cancel/modify, memory pool, benchmarks.
 - [ ] Stage 4: load generator, full documentation.
-
-The CLI currently builds but does not process input yet (Stage 1).

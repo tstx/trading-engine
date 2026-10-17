@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "engine/event_sink.hpp"
@@ -49,7 +50,7 @@ private:
     SeqNo next_seq_{1};
     std::unordered_map<SymbolId, std::unique_ptr<OrderBook>> books_;
     std::unordered_map<OrderId, std::unique_ptr<Order>> live_orders_;  // resting, besitzt die Orders
-    std::unordered_map<OrderId, bool> known_ids_;                      // alle je akzeptierten IDs
+    std::unordered_set<OrderId> known_ids_;                            // alle je akzeptierten IDs
 };
 
 }  // namespace engine

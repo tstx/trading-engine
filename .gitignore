@@ -8,3 +8,4 @@ CMakeUserPresets.json
 *~
 .DS_Store
 perf.data*
+.claude/

@@ -61,7 +61,7 @@ void MatchingEngine::handle(const NewOrder& order) {
 
     OrderBook& book = *book_it->second;
     const SeqNo seq = next_seq_++;
-    known_ids_.emplace(order.id, true);
+    known_ids_.insert(order.id);
 
     auto aggressor = std::make_unique<Order>();
     aggressor->id = order.id;
