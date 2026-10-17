@@ -1,0 +1,30 @@
+# Google-Basis, angepasst an den bestehenden Stil (4 Spaces, 120 Spalten).
+# CI pinnt clang-format-18 (Ubuntu 24.04).
+---
+Language: Cpp
+BasedOnStyle: Google
+Standard: c++20
+IndentWidth: 4
+ColumnLimit: 120
+AccessModifierOffset: -4
+IndentCaseLabels: true
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortEnumsOnASingleLine: true
+DerivePointerAlignment: false
+PointerAlignment: Left
+SpacesBeforeTrailingComments: 2
+IncludeBlocks: Regroup
+IncludeCategories:
+  # 1: Standardbibliothek (<vector>, <cstdint>, ...)
+  - Regex: '^<[a-z_]+>$'
+    Priority: 1
+  # 2: Drittanbieter (<gtest/gtest.h>, <benchmark/benchmark.h>)
+  - Regex: '^<.*>$'
+    Priority: 2
+  # 3: Projekt-Header ("engine/...")
+  - Regex: '^".*"$'
+    Priority: 3
+...

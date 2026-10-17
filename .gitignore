@@ -1,3 +1,10 @@
 build/
 .cache/
 compile_commands.json
+CMakeUserPresets.json
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+perf.data*
