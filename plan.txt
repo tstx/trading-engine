@@ -1,0 +1,295 @@
+## Ziel
+
+Eine performante, nebenläufige **Order-Matching-Engine** in modernem C++ (C++20) — das Herzstück einer Börse. Clients schicken Orders, die Engine führt ein Orderbuch pro Instrument, matcht Kauf- und Verkaufsorders nach **Price-Time-Priority** und meldet Ergebnisse als Events.
+
+**Was das Projekt zeigen soll:** kein Library-Schnipsel, sondern ein laufendes System mit klarer Spezifikation, Tests, gemessenem Durchsatz und Latenz.
+
+---
+
+## 1. Begriffe
+
+- **Order:** Auftrag, eine Menge eines Instruments zu kaufen (BUY / Bid) oder zu verkaufen (SELL / Ask).
+- **Limit-Order:** handelt nur zum angegebenen Preis oder besser. Nicht ausgeführter Rest bleibt im Buch liegen („resting order").
+- **Market-Order:** handelt sofort zum besten verfügbaren Preis. Nicht ausführbarer Rest wird verworfen (kein Liegenbleiben).
+- **Aggressor:** die neu eingehende Order, die gegen das Buch matcht. **Resting:** die Order, die schon im Buch liegt.
+- **Price Level:** alle Orders einer Seite zum selben Preis, in Ankunftsreihenfolge (FIFO).
+- **Tick:** kleinste Preiseinheit. Preise werden als **Ganzzahl in Ticks** gespeichert (z. B. 100,50 € → `10050`), nie als `double`.
+
+---
+
+## 2. Funktionale Requirements
+
+### Orders
+
+- **FR-1** Die Engine akzeptiert NEW-Orders vom Typ LIMIT und MARKET, Seite BUY oder SELL.
+- **FR-2** Jede Order hat eine eindeutige `order_id`. Eine bereits bekannte ID wird mit REJECT abgelehnt.
+- **FR-3** Validierung: `quantity > 0`; bei LIMIT `price > 0`; Instrument muss bekannt sein. Ungültige Orders → REJECT mit Grund.
+- **FR-4** Die Engine vergibt jeder akzeptierten Order eine fortlaufende **Sequenznummer** (bestimmt die Zeit-Priorität, nicht die Wanduhr).
+
+### Matching
+
+- **FR-5 Price-Time-Priority:** Ein BUY matcht gegen den niedrigsten Ask, ein SELL gegen den höchsten Bid. Bei gleichem Preis gewinnt die ältere Order (kleinere Sequenznummer).
+- **FR-6 Kreuzungsbedingung:** BUY-Limit matcht, solange `bester_ask <= limit_preis`; SELL-Limit, solange `bester_bid >= limit_preis`. Market-Orders matchen ohne Preisgrenze.
+- **FR-7 Ausführungspreis:** Ein Trade findet immer zum Preis der **resting** Order statt.
+- **FR-8 Partielle Fills:** Eine Order kann über mehrere Trades und mehrere Price Levels ausgeführt werden. Gehandelte Menge = `min(rest_aggressor, rest_resting)`.
+- **FR-9** Ist eine resting Order vollständig gefüllt, wird sie aus dem Buch entfernt; ein leeres Price Level wird gelöscht.
+- **FR-10** Verbleibender Rest einer LIMIT-Order wird ins Buch gelegt (ACK bleibt gültig). Verbleibender Rest einer MARKET-Order wird verworfen und als CANCELLED (Grund: `NO_LIQUIDITY`) gemeldet.
+
+### Cancel & Modify (ab Stufe 3)
+
+- **FR-11 CANCEL** entfernt eine resting Order. Unbekannte oder bereits gefüllte ID → REJECT.
+- **FR-12 MODIFY** (Cancel/Replace):
+    - Nur Mengen-**Reduktion** bei gleichem Preis → Order behält ihre Zeit-Priorität.
+    - Preisänderung oder Mengen-**Erhöhung** → Order verliert die Priorität (neue Sequenznummer, hinten anstellen) und kann dabei sofort matchen.
+    - Neue Menge muss größer als bereits gefüllte Menge sein, sonst REJECT.
+
+### Abfragen
+
+- **FR-13** Top of Book (bester Bid/Ask mit Menge) und eine Buch-Tiefe (z. B. 5 Level je Seite) lassen sich abfragen.
+
+---
+
+## 3. Input
+
+### 3.1 Text-Protokoll (CLI / Datei / später TCP)
+
+Eine Nachricht pro Zeile, Felder kommagetrennt:
+
+```
+NEW,<order_id>,<symbol>,<BUY|SELL>,<LIMIT|MARKET>,<price_ticks>,<quantity>
+CANCEL,<order_id>
+MODIFY,<order_id>,<new_price_ticks>,<new_quantity>
+BOOK,<symbol>
+```
+
+Bei MARKET-Orders ist `price_ticks` = `0`.
+
+Beispiel:
+
+```
+NEW,1,ACME,SELL,LIMIT,10100,50
+NEW,2,ACME,SELL,LIMIT,10100,30
+NEW,3,ACME,SELL,LIMIT,10200,100
+NEW,4,ACME,BUY,LIMIT,10150,70
+BOOK,ACME
+```
+
+### 3.2 Interne Darstellung (binär, heißer Pfad)
+
+```cpp
+using OrderId  = std::uint64_t;
+using Price    = std::int64_t;   // in Ticks
+using Quantity = std::uint64_t;
+using SymbolId = std::uint32_t;  // Symbol-String wird beim Parsen auf ID gemappt
+
+enum class Side : std::uint8_t { Buy, Sell };
+enum class OrderType : std::uint8_t { Limit, Market };
+
+struct NewOrder {
+    OrderId   id;
+    SymbolId  symbol;
+    Side      side;
+    OrderType type;
+    Price     price;     // 0 bei Market
+    Quantity  quantity;
+};
+
+struct CancelOrder { OrderId id; };
+struct ModifyOrder { OrderId id; Price new_price; Quantity new_quantity; };
+
+using Command = std::variant<NewOrder, CancelOrder, ModifyOrder>;
+```
+
+Die Command-Structs sind trivial kopierbar und landen so in der Lock-free Queue (kein `std::string` im heißen Pfad).
+
+---
+
+## 4. Output
+
+Die Engine erzeugt Events in genau dieser Reihenfolge pro eingehender Nachricht.
+
+### 4.1 Event-Typen
+
+```
+ACK,<order_id>,<seq>
+REJECT,<order_id>,<reason>
+TRADE,<symbol>,<price_ticks>,<quantity>,<buy_order_id>,<sell_order_id>,<aggressor_side>
+FILL,<order_id>,<filled_qty>,<remaining_qty>
+CANCELLED,<order_id>,<remaining_qty>,<reason>
+BOOK,<symbol>,BIDS:<price>x<qty>;...,ASKS:<price>x<qty>;...
+```
+
+Reject-Gründe: `DUPLICATE_ID`, `INVALID_QUANTITY`, `INVALID_PRICE`, `UNKNOWN_SYMBOL`, `UNKNOWN_ORDER`, `INVALID_MODIFY`.
+
+Cancel-Gründe: `USER`, `NO_LIQUIDITY`.
+
+### 4.2 Erwartete Ausgabe zum Beispiel oben
+
+```
+ACK,1,1
+ACK,2,2
+ACK,3,3
+ACK,4,4
+TRADE,ACME,10100,50,4,1,BUY
+FILL,1,50,0
+FILL,4,50,20
+TRADE,ACME,10100,20,4,2,BUY
+FILL,2,20,10
+FILL,4,20,0
+BOOK,ACME,BIDS:,ASKS:10100x10;10200x100
+```
+
+Erklärung: Order 4 (BUY 70 @ 101,50) kreuzt mit dem Ask-Level 101,00. Zuerst gegen Order 1 (älter, 50 Stück, komplett gefüllt), dann gegen Order 2 (20 von 30). Preis ist jeweils der resting Preis 101,00, nicht 101,50. Order 4 ist voll gefüllt, also bleibt bei den Bids nichts liegen. Level 102,00 wird gar nicht berührt, weil 102,00 > 101,50.
+
+### 4.3 Weiteres Testszenario: Market-Order ohne genug Liquidität
+
+```
+NEW,10,ACME,BUY,LIMIT,9900,40
+NEW,11,ACME,SELL,MARKET,0,100
+```
+
+```
+ACK,10,1
+ACK,11,2
+TRADE,ACME,9900,40,10,11,SELL
+FILL,10,40,0
+FILL,11,40,60
+CANCELLED,11,60,NO_LIQUIDITY
+```
+
+---
+
+## 5. Schnittstelle (C++-API)
+
+```cpp
+class EventSink {
+public:
+    virtual ~EventSink() = default;
+    virtual void on_ack(OrderId, std::uint64_t seq) = 0;
+    virtual void on_reject(OrderId, RejectReason) = 0;
+    virtual void on_trade(const Trade&) = 0;
+    virtual void on_fill(OrderId, Quantity filled, Quantity remaining) = 0;
+    virtual void on_cancelled(OrderId, Quantity remaining, CancelReason) = 0;
+};
+
+class MatchingEngine {
+public:
+    explicit MatchingEngine(EventSink& sink);
+    void process(const Command& cmd);          // eine Nachricht verarbeiten
+    BookSnapshot snapshot(SymbolId, std::size_t depth) const;
+};
+```
+
+Die Engine kennt kein I/O. Parser, Netzwerk und Logging hängen außen dran. Dadurch ist die Matching-Logik ohne Threads und ohne Dateien testbar.
+
+---
+
+## 6. Datenstrukturen (Vorschlag)
+
+- **Order:** `id`, `side`, `price`, `remaining`, `filled`, `seq`, plus `prev`/`next`-Pointer (intrusive Liste).
+- **PriceLevel:** Preis, Gesamtmenge, FIFO als intrusive doppelt verkettete Liste → O(1) anhängen, O(1) entfernen aus der Mitte (wichtig für Cancel).
+- **Buchseite (Stufe 1):** `std::map<Price, PriceLevel>` — Bids mit `std::greater` (bester = höchster zuerst), Asks mit `std::less`. Bester Preis = `begin()`.
+- **Order-Index:** `std::unordered_map<OrderId, Order*>` → Cancel/Modify in O(1).
+- **Optimierung (Stufe 3):** Orders aus einem Memory-Pool statt `new`; optional Price Levels als Array über einen Tick-Bereich statt `std::map`; Vergleich per Benchmark.
+
+---
+
+## 7. Nicht-funktionale Requirements
+
+- **NFR-1 Sprache/Build:** C++20, CMake ≥ 3.20, läuft unter Linux mit GCC und Clang.
+- **NFR-2 Abhängigkeiten:** nur GoogleTest (Tests) und Google Benchmark (Benchmarks), per CMake `FetchContent`.
+- **NFR-3 Qualität:** `-Wall -Wextra -Werror`, clang-tidy, clang-format.
+- **NFR-4 Korrektheit:** Tests laufen sauber unter AddressSanitizer, UndefinedBehaviorSanitizer und ThreadSanitizer.
+- **NFR-5 Determinismus:** gleiche Eingabedatei → bitgenau gleiche Ausgabe (Replay-Test).
+- **NFR-6 Heißer Pfad (ab Stufe 3):** keine dynamische Allokation, keine Locks, kein I/O im Matching.
+- **NFR-7 Performance-Ziele (Orientierung, messen und dokumentieren):**
+    - Matching single-threaded: > 1 Mio. Orders/s
+    - Latenz pro Order (Engine-intern): p50 < 1 µs, p99 < 5 µs
+- **NFR-8 CI:** GitHub Actions baut, testet und fährt die Sanitizer bei jedem Push.
+
+---
+
+## 8. Projektstruktur
+
+```
+trading-engine/
+├── CMakeLists.txt
+├── include/engine/
+│   ├── types.hpp          // OrderId, Price, Side, Command ...
+│   ├── order_book.hpp
+│   ├── matching_engine.hpp
+│   └── event_sink.hpp
+├── src/
+│   ├── order_book.cpp
+│   ├── matching_engine.cpp
+│   ├── parser.cpp         // Text-Protokoll → Command
+│   └── main.cpp           // CLI: liest stdin/Datei, schreibt Events
+├── tests/
+│   ├── order_book_test.cpp
+│   ├── matching_test.cpp
+│   └── replay/            // .in / .expected Dateipaare
+├── bench/
+│   └── matching_bench.cpp
+└── .github/workflows/ci.yml
+```
+
+---
+
+## 9. Testfälle (Mindestliste)
+
+- [ ]  Limit-Order ohne Gegenseite → liegt im Buch, nur ACK.
+- [ ]  Exakter Match gleicher Menge → beide komplett gefüllt, Buch leer.
+- [ ]  Partieller Fill: Aggressor größer als resting → Rest liegt im Buch.
+- [ ]  Partieller Fill: resting größer → resting bleibt mit Restmenge.
+- [ ]  Zeit-Priorität: zwei Orders gleicher Preis → ältere wird zuerst gefüllt.
+- [ ]  Preis-Priorität: besserer Preis wird vor älterer Order gefüllt.
+- [ ]  Sweep über mehrere Price Levels.
+- [ ]  Ausführungspreis = resting Preis (nicht Limit des Aggressors).
+- [ ]  Limit kreuzt nicht → kein Trade.
+- [ ]  Market-Order mit genug Liquidität / ohne Liquidität (CANCELLED NO_LIQUIDITY).
+- [ ]  Rejects: doppelte ID, Menge 0, Preis ≤ 0, unbekanntes Symbol.
+- [ ]  Cancel: existierend, unbekannt, bereits gefüllt.
+- [ ]  Modify: Reduktion behält Priorität; Preisänderung verliert Priorität und kann sofort matchen.
+- [ ]  Replay-Test: Datei rein → erwartete Ausgabe exakt.
+- [ ]  (Stufe 2) Stress: N Producer-Threads, Gesamtmenge gehandelt = erwartete Summe, TSan sauber.
+
+---
+
+## 10. Ausbaustufen mit Abnahmekriterien
+
+### Stufe 0 — Gerüst (½ Tag)
+
+- Repo, CMake, GoogleTest, CI mit Sanitizern, leere Typen.
+- **Fertig, wenn:** CI grün mit einem Dummy-Test.
+
+### Stufe 1 — Kern-Matching
+
+- `types.hpp`, `OrderBook`, `MatchingEngine::process` für NEW (LIMIT/MARKET), EventSink, Text-Parser, CLI.
+- **Fertig, wenn:** Beispiele aus Abschnitt 4 exakt reproduziert werden und alle Testfälle außer Cancel/Modify/Stress grün sind.
+
+### Stufe 2 — Nebenläufigkeit
+
+- Lock-free MPSC-Queue (vorhandene Queue) als Eingang, Engine als eigener Consumer-Thread, SPSC-Queue für Events zum Logger-Thread.
+- Mehrere Producer-Threads generieren Orders.
+- **Fertig, wenn:** Stresstest grün, TSan sauber, Ergebnis deterministisch bei Single-Producer-Replay.
+
+### Stufe 3 — Cancel/Modify & Performance
+
+- CANCEL, MODIFY, mehrere Instrumente, Memory-Pool, Benchmarks (Durchsatz, p50/p99).
+- **Fertig, wenn:** NFR-6 erfüllt, Benchmark-Ergebnisse vorher/nachher im README.
+
+### Stufe 4 — Show
+
+- Order-Generator für realistische Last, optional TCP-Server statt stdin.
+- README auf Englisch: Architektur-Diagramm, Design-Entscheidungen (warum Matching single-threaded, warum Ticks statt double, warum intrusive Liste), Benchmark-Graphen.
+- **Fertig, wenn:** Ein Fremder kann klonen, bauen, Demo starten und versteht in 2 Minuten, was das Ding kann.
+
+---
+
+## 11. Nächste Schritte
+
+- [ ]  GitHub-Repo `trading-engine` anlegen.
+- [ ]  Stufe 0: CMake + GoogleTest + CI mit ASan/UBSan/TSan.
+- [ ]  `types.hpp` nach Abschnitt 3.2 schreiben.
+- [ ]  Testfälle aus Abschnitt 9 zuerst als (rote) Tests anlegen, dann Stufe 1 implementieren.
+- [ ]  Replay-Dateien aus Abschnitt 4 als erste `.in`/`.expected`-Paare ablegen.
