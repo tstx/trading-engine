@@ -73,8 +73,6 @@ jobs:
   tidy:
     name: clang-tidy
     runs-on: ubuntu-24.04
-    # Vorerst nur informativ; wird scharf geschaltet, sobald Stufe 1 sauber ist.
-    continue-on-error: true
     env:
       CC: clang-18
       CXX: clang++-18

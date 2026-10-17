@@ -55,9 +55,13 @@ if(ENGINE_BUILD_TESTS)
 
     # NFR-6: eigenes Executable, weil allocation_test.cpp den globalen operator new/delete
     # ersetzt (zählend); das soll die übrigen Tests nicht beeinflussen.
-    add_executable(allocation_tests tests/allocation_test.cpp)
-    target_link_libraries(allocation_tests PRIVATE engine_core engine_warnings GTest::gtest_main)
-    gtest_discover_tests(allocation_tests)
+    # Nicht unter TSan: clangs statisch gelinkte TSan-Runtime definiert operator new selbst
+    # (multiple definition). Der Test ist single-threaded; ASan/UBSan und Release decken ihn ab.
+    if(NOT ENGINE_SANITIZE MATCHES "thread")
+        add_executable(allocation_tests tests/allocation_test.cpp)
+        target_link_libraries(allocation_tests PRIVATE engine_core engine_warnings GTest::gtest_main)
+        gtest_discover_tests(allocation_tests)
+    endif()
 
     # Replay-Tests: jedes tests/replay/<name>.in muss exakt <name>.expected ergeben (NFR-5),
     # single-threaded und über die Pipeline (--threaded).
