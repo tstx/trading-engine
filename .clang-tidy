@@ -1,0 +1,74 @@
+# clang-tidy-Konfiguration (CI: clang-tidy-18 mit build/debug/compile_commands.json).
+---
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  cert-err58-cpp,
+  clang-analyzer-*,
+  concurrency-*,
+  cppcoreguidelines-pro-type-member-init,
+  cppcoreguidelines-slicing,
+  cppcoreguidelines-special-member-functions,
+  misc-const-correctness,
+  misc-definitions-in-headers,
+  misc-misplaced-const,
+  misc-redundant-expression,
+  misc-unused-parameters,
+  misc-unused-using-decls,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard,
+  -modernize-avoid-c-arrays,
+  performance-*,
+  readability-braces-around-statements,
+  readability-const-return-type,
+  readability-container-size-empty,
+  readability-else-after-return,
+  readability-identifier-naming,
+  readability-inconsistent-declaration-parameter-name,
+  readability-make-member-function-const,
+  readability-redundant-*,
+  readability-simplify-boolean-expr
+
+WarningsAsErrors: ''
+# Nur eigene Header melden (nicht gtest/benchmark aus _deps).
+HeaderFilterRegex: '.*/include/engine/.*'
+FormatStyle: file
+
+CheckOptions:
+  - { key: cppcoreguidelines-special-member-functions.AllowSoleDefaultDtor, value: true }
+  - { key: cppcoreguidelines-special-member-functions.AllowMissingMoveFunctionsWhenCopyIsDeleted, value: true }
+  - { key: misc-const-correctness.AnalyzeValues, value: false }
+
+  # Namenskonventionen des bestehenden Codes:
+  #   Typen/Aliase/Enums/Enum-Werte: CamelCase (OrderBook, OrderId, Side::Buy)
+  #   Funktionen/Variablen/Parameter/Namespaces: snake_case
+  #   private/protected Member: snake_case mit Suffix '_' (sink_, books_)
+  #   öffentliche Struct-Member: snake_case ohne Suffix (Order::remaining)
+  #   Konstanten (constexpr / static const): kCamelCase (kUnknownSymbol)
+  - { key: readability-identifier-naming.NamespaceCase,              value: lower_case }
+  - { key: readability-identifier-naming.ClassCase,                  value: CamelCase }
+  - { key: readability-identifier-naming.StructCase,                 value: CamelCase }
+  - { key: readability-identifier-naming.UnionCase,                  value: CamelCase }
+  - { key: readability-identifier-naming.EnumCase,                   value: CamelCase }
+  - { key: readability-identifier-naming.EnumConstantCase,           value: CamelCase }
+  - { key: readability-identifier-naming.TypeAliasCase,              value: CamelCase }
+  - { key: readability-identifier-naming.TypedefCase,                value: CamelCase }
+  - { key: readability-identifier-naming.TemplateParameterCase,      value: CamelCase }
+  - { key: readability-identifier-naming.ConceptCase,                value: CamelCase }
+  - { key: readability-identifier-naming.FunctionCase,               value: lower_case }
+  - { key: readability-identifier-naming.MethodCase,                 value: lower_case }
+  - { key: readability-identifier-naming.VariableCase,               value: lower_case }
+  - { key: readability-identifier-naming.ParameterCase,              value: lower_case }
+  - { key: readability-identifier-naming.MemberCase,                 value: lower_case }
+  - { key: readability-identifier-naming.PrivateMemberSuffix,        value: _ }
+  - { key: readability-identifier-naming.ProtectedMemberSuffix,      value: _ }
+  - { key: readability-identifier-naming.ConstexprVariableCase,      value: CamelCase }
+  - { key: readability-identifier-naming.ConstexprVariablePrefix,    value: k }
+  - { key: readability-identifier-naming.GlobalConstantCase,         value: CamelCase }
+  - { key: readability-identifier-naming.GlobalConstantPrefix,       value: k }
+  - { key: readability-identifier-naming.StaticConstantCase,         value: CamelCase }
+  - { key: readability-identifier-naming.StaticConstantPrefix,       value: k }
+  - { key: readability-identifier-naming.MacroDefinitionCase,        value: UPPER_CASE }
+...
