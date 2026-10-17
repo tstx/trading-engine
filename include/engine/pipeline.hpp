@@ -34,6 +34,7 @@ using EventQueue = SpscQueue<Event, kEventQueueCapacity>;
 // stop() darf erst aufgerufen werden, wenn alle submit()-Aufrufe zurückgekehrt sind;
 // es wartet, bis alle Requests verarbeitet und alle Events an output geliefert sind,
 // und joint dann beide Threads. Der Destruktor ruft stop(), falls nötig.
+// submit() vor start() blockiert, sobald die RequestQueue voll ist.
 class Pipeline {
 public:
     explicit Pipeline(EventSink& output);
