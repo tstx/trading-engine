@@ -4,22 +4,38 @@
 
 namespace engine {
 
-MatchingEngine::MatchingEngine(EventSink& sink) : sink_(sink) {}
-MatchingEngine::~MatchingEngine() = default;
+template <typename Book>
+BasicMatchingEngine<Book>::BasicMatchingEngine(EventSink& sink, const EngineConfig& config)
+    : config_(config),
+      sink_(sink),
+      orders_(config.order_capacity),
+      live_orders_(config.order_capacity),
+      known_ids_(config.id_capacity) {
+    books_.reserve(config.symbol_capacity);
+}
 
-void MatchingEngine::add_symbol(SymbolId symbol) {
+template <typename Book>
+BasicMatchingEngine<Book>::~BasicMatchingEngine() = default;
+
+template <typename Book>
+void BasicMatchingEngine<Book>::add_symbol(SymbolId symbol) {
     if (!books_.contains(symbol)) {
-        books_.emplace(symbol, std::make_unique<OrderBook>(symbol));
+        books_.emplace(symbol, std::make_unique<Book>(symbol, config_));
     }
 }
 
-bool MatchingEngine::has_symbol(SymbolId symbol) const { return books_.contains(symbol); }
-
-void MatchingEngine::process(const Command& cmd) {
-    std::visit([this](const auto& c) { handle(c); }, cmd);
+template <typename Book>
+bool BasicMatchingEngine<Book>::has_symbol(SymbolId symbol) const {
+    return books_.contains(symbol);
 }
 
-BookSnapshot MatchingEngine::snapshot(SymbolId symbol, std::size_t depth) const {
+template <typename Book>
+void BasicMatchingEngine<Book>::process(const Command& cmd) {
+    std::visit([this](const auto& c) { this->handle(c); }, cmd);
+}
+
+template <typename Book>
+BookSnapshot BasicMatchingEngine<Book>::snapshot(SymbolId symbol, std::size_t depth) const {
     auto it = books_.find(symbol);
     if (it == books_.end()) {
         return BookSnapshot{symbol, {}, {}};
@@ -39,7 +55,8 @@ bool crosses(const Order& aggressor, OrderType type, const Order& resting) noexc
 
 }  // namespace
 
-void MatchingEngine::handle(const NewOrder& order) {
+template <typename Book>
+void BasicMatchingEngine<Book>::handle(const NewOrder& order) {
     // Validierung, Reihenfolge verbindlich (siehe Header).
     if (known_ids_.contains(order.id)) {
         sink_.on_reject(order.id, RejectReason::DuplicateId);
@@ -54,17 +71,18 @@ void MatchingEngine::handle(const NewOrder& order) {
         sink_.on_reject(order.id, RejectReason::InvalidQuantity);
         return;
     }
-    if (order.type == OrderType::Limit && order.price <= 0) {
+    Book& book = *book_it->second;
+    if (order.type == OrderType::Limit && (order.price <= 0 || !book.accepts_price(order.price))) {
         sink_.on_reject(order.id, RejectReason::InvalidPrice);
         return;
     }
 
-    OrderBook& book = *book_it->second;
     const SeqNo seq = next_seq_++;
     known_ids_.insert(order.id);
 
-    auto aggressor = std::make_unique<Order>();
+    Order* aggressor = orders_.create();
     aggressor->id = order.id;
+    aggressor->symbol = order.symbol;
     aggressor->side = order.side;
     aggressor->price = order.type == OrderType::Market ? Price{0} : order.price;
     aggressor->remaining = order.quantity;
@@ -97,23 +115,37 @@ void MatchingEngine::handle(const NewOrder& order) {
 
         if (resting->remaining == 0) {
             book.remove(resting);
-            live_orders_.erase(resting->id);  // gibt die Order frei; ID bleibt in known_ids_
+            live_orders_.erase(resting->id);  // ID bleibt in known_ids_
+            orders_.destroy(resting);
         }
     }
 
     if (aggressor->remaining == 0) {
+        orders_.destroy(aggressor);
         return;
     }
     if (order.type == OrderType::Market) {
         sink_.on_cancelled(aggressor->id, aggressor->remaining, CancelReason::NoLiquidity);
+        orders_.destroy(aggressor);
         return;
     }
-    Order* resting = aggressor.get();
-    live_orders_.emplace(order.id, std::move(aggressor));
-    book.add(resting);
+    live_orders_.insert(order.id, aggressor);
+    book.add(aggressor);
 }
 
-void MatchingEngine::handle(const CancelOrder& cancel) { sink_.on_reject(cancel.id, RejectReason::UnknownOrder); }
-void MatchingEngine::handle(const ModifyOrder& modify) { sink_.on_reject(modify.id, RejectReason::UnknownOrder); }
+// Stufe 3: CANCEL/MODIFY (siehe Header) — STUB.
+template <typename Book>
+void BasicMatchingEngine<Book>::handle(const CancelOrder& cancel) {
+    sink_.on_reject(cancel.id, RejectReason::UnknownOrder);
+}
+
+template <typename Book>
+void BasicMatchingEngine<Book>::handle(const ModifyOrder& modify) {
+    sink_.on_reject(modify.id, RejectReason::UnknownOrder);
+}
+
+template class BasicMatchingEngine<MapOrderBook>;
+template class BasicMatchingEngine<VectorOrderBook>;
+template class BasicMatchingEngine<TickOrderBook>;
 
 }  // namespace engine

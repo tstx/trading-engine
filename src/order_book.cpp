@@ -35,46 +35,51 @@ void PriceLevel::erase(Order* order) noexcept {
 
 namespace {
 
-template <typename SideMap>
-void add_to(SideMap& levels, Order* order) {
-    auto [it, inserted] = levels.try_emplace(order->price);
-    if (inserted) {
-        it->second.price = order->price;
-    }
-    it->second.push_back(order);
+template <typename Store>
+void add_to(Store& levels, Order* order) {
+    PriceLevel* level = levels.find_or_create(order->price);
+    level->push_back(order);
+    order->level = level;
 }
 
-template <typename SideMap>
-void remove_from(SideMap& levels, Order* order) {
-    auto it = levels.find(order->price);
-    if (it == levels.end()) {
+template <typename Store>
+void remove_from(Store& levels, Order* order) {
+    PriceLevel* level = order->level;
+    if (level == nullptr) {
         return;
     }
-    it->second.erase(order);
-    if (it->second.empty()) {
-        levels.erase(it);
+    level->erase(order);
+    order->level = nullptr;
+    if (level->empty()) {
+        levels.erase(level);
     }
 }
 
-template <typename SideMap>
-Order* best_of(const SideMap& levels) noexcept {
-    return levels.empty() ? nullptr : levels.begin()->second.head;
-}
-
-template <typename SideMap>
-void collect(const SideMap& levels, std::size_t depth, std::vector<BookLevel>& out) {
+template <typename Store>
+void collect(const Store& levels, std::size_t depth, std::vector<BookLevel>& out) {
     out.reserve(std::min(depth, levels.size()));
-    for (const auto& [price, level] : levels) {
+    levels.for_each([&](const PriceLevel& level) {
         if (out.size() >= depth) {
-            break;
+            return false;
         }
-        out.push_back(BookLevel{price, level.total_quantity});
-    }
+        out.push_back(BookLevel{level.price, level.total_quantity});
+        return true;
+    });
 }
 
 }  // namespace
 
-void OrderBook::add(Order* order) {
+template <template <typename> class LevelStore>
+BasicOrderBook<LevelStore>::BasicOrderBook(SymbolId symbol, const EngineConfig& config)
+    : symbol_(symbol), bids_(config), asks_(config) {}
+
+template <template <typename> class LevelStore>
+bool BasicOrderBook<LevelStore>::accepts_price(Price price) const noexcept {
+    return bids_.accepts(price) && asks_.accepts(price);
+}
+
+template <template <typename> class LevelStore>
+void BasicOrderBook<LevelStore>::add(Order* order) {
     if (order->side == Side::Buy) {
         add_to(bids_, order);
     } else {
@@ -82,7 +87,8 @@ void OrderBook::add(Order* order) {
     }
 }
 
-void OrderBook::remove(Order* order) {
+template <template <typename> class LevelStore>
+void BasicOrderBook<LevelStore>::remove(Order* order) {
     if (order->side == Side::Buy) {
         remove_from(bids_, order);
     } else {
@@ -90,34 +96,45 @@ void OrderBook::remove(Order* order) {
     }
 }
 
-void OrderBook::fill(Order* order, Quantity qty) {
-    PriceLevel* level = nullptr;
-    if (order->side == Side::Buy) {
-        auto it = bids_.find(order->price);
-        if (it != bids_.end()) {
-            level = &it->second;
-        }
-    } else {
-        auto it = asks_.find(order->price);
-        if (it != asks_.end()) {
-            level = &it->second;
-        }
-    }
+template <template <typename> class LevelStore>
+void BasicOrderBook<LevelStore>::fill(Order* order, Quantity qty) {
     order->remaining -= qty;
     order->filled += qty;
-    if (level != nullptr) {
-        level->total_quantity -= qty;
+    if (order->level != nullptr) {
+        order->level->total_quantity -= qty;
     }
 }
 
-Order* OrderBook::best_bid() const noexcept { return best_of(bids_); }
-Order* OrderBook::best_ask() const noexcept { return best_of(asks_); }
+template <template <typename> class LevelStore>
+void BasicOrderBook<LevelStore>::reduce(Order* order, Quantity new_remaining) {
+    if (order->level != nullptr) {
+        order->level->total_quantity -= order->remaining - new_remaining;
+    }
+    order->remaining = new_remaining;
+}
 
-BookSnapshot OrderBook::snapshot(std::size_t depth) const {
+template <template <typename> class LevelStore>
+Order* BasicOrderBook<LevelStore>::best_bid() const noexcept {
+    const PriceLevel* level = bids_.best();
+    return level == nullptr ? nullptr : level->head;
+}
+
+template <template <typename> class LevelStore>
+Order* BasicOrderBook<LevelStore>::best_ask() const noexcept {
+    const PriceLevel* level = asks_.best();
+    return level == nullptr ? nullptr : level->head;
+}
+
+template <template <typename> class LevelStore>
+BookSnapshot BasicOrderBook<LevelStore>::snapshot(std::size_t depth) const {
     BookSnapshot snap{symbol_, {}, {}};
     collect(bids_, depth, snap.bids);
     collect(asks_, depth, snap.asks);
     return snap;
 }
+
+template class BasicOrderBook<MapLevels>;
+template class BasicOrderBook<SortedVectorLevels>;
+template class BasicOrderBook<TickArrayLevels>;
 
 }  // namespace engine

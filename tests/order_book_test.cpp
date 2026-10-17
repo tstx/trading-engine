@@ -120,7 +120,7 @@ TEST_F(OrderBookTest, AddBidCreatesLevelOnBidSideOnly) {
     EXPECT_EQ(book.best_ask(), nullptr);
     ASSERT_EQ(book.bids().size(), 1U);
     EXPECT_TRUE(book.asks().empty());
-    const auto& level = book.bids().begin()->second;
+    const auto& level = (*book.bids().best());
     EXPECT_EQ(level.price, 10000);
     EXPECT_EQ(level.total_quantity, 50U);
     EXPECT_EQ(level.head, o);
@@ -133,7 +133,7 @@ TEST_F(OrderBookTest, AddAskCreatesLevelOnAskSideOnly) {
     EXPECT_EQ(book.best_bid(), nullptr);
     ASSERT_EQ(book.asks().size(), 1U);
     EXPECT_TRUE(book.bids().empty());
-    const auto& level = book.asks().begin()->second;
+    const auto& level = (*book.asks().best());
     EXPECT_EQ(level.price, 10100);
     EXPECT_EQ(level.total_quantity, 30U);
 }
@@ -159,7 +159,7 @@ TEST_F(OrderBookTest, FifoWithinLevel) {
     Order* b = ask(2, 10100, 30);
     Order* c = ask(3, 10100, 20);
     ASSERT_EQ(book.asks().size(), 1U);
-    const auto& level = book.asks().begin()->second;
+    const auto& level = (*book.asks().best());
     EXPECT_EQ(level.total_quantity, 100U);
     EXPECT_EQ(level.head, a);
     EXPECT_EQ(level.tail, c);
@@ -179,7 +179,7 @@ TEST_F(OrderBookTest, RemoveFromMiddleKeepsOrderAndTotal) {
     Order* c = bid(3, 10000, 30);
     book.remove(b);
     ASSERT_EQ(book.bids().size(), 1U);
-    const auto& level = book.bids().begin()->second;
+    const auto& level = (*book.bids().best());
     EXPECT_EQ(level.total_quantity, 40U);
     EXPECT_EQ(level.head, a);
     EXPECT_EQ(level.tail, c);
@@ -193,7 +193,7 @@ TEST_F(OrderBookTest, RemoveLastOrderDeletesLevel) {
     Order* b = ask(2, 10200, 10);
     book.remove(a);
     ASSERT_EQ(book.asks().size(), 1U);
-    EXPECT_EQ(book.asks().begin()->first, 10200);
+    EXPECT_EQ(book.asks().best()->price, 10200);
     EXPECT_EQ(book.best_ask(), b);
     book.remove(b);
     EXPECT_TRUE(book.asks().empty());
@@ -207,13 +207,13 @@ TEST_F(OrderBookTest, FillReducesRemainingAndLevelTotal) {
     book.fill(a, 20);
     EXPECT_EQ(a->remaining, 30U);
     EXPECT_EQ(a->filled, 20U);
-    EXPECT_EQ(book.asks().begin()->second.total_quantity, 60U);
+    EXPECT_EQ((*book.asks().best()).total_quantity, 60U);
     EXPECT_EQ(book.best_ask(), a);  // Priorität bleibt erhalten
 
     book.fill(a, 5);
     EXPECT_EQ(a->remaining, 25U);
     EXPECT_EQ(a->filled, 25U);
-    EXPECT_EQ(book.asks().begin()->second.total_quantity, 55U);
+    EXPECT_EQ((*book.asks().best()).total_quantity, 55U);
 }
 
 TEST_F(OrderBookTest, FillToZeroDoesNotRemove) {
@@ -222,7 +222,7 @@ TEST_F(OrderBookTest, FillToZeroDoesNotRemove) {
     EXPECT_EQ(a->remaining, 0U);
     EXPECT_EQ(a->filled, 40U);
     ASSERT_EQ(book.bids().size(), 1U);
-    EXPECT_EQ(book.bids().begin()->second.total_quantity, 0U);
+    EXPECT_EQ((*book.bids().best()).total_quantity, 0U);
     EXPECT_EQ(book.best_bid(), a);
 
     book.remove(a);
