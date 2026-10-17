@@ -13,8 +13,9 @@ namespace engine {
 // Jede Implementierung bietet:
 //   explicit Store(const EngineConfig&)
 //   bool accepts(Price) const noexcept          Preis darstellbar? (Tick-Array: Preisband)
-//   PriceLevel* find_or_create(Price)           legt ein leeres Level an, falls nötig
-//   void erase(PriceLevel*)                     entfernt ein (leeres) Level
+//   PriceLevel* find_or_create(Price)           legt ein leeres Level an, falls nötig;
+//                                               setzt accepts(price) voraus
+//   void erase(PriceLevel*)                     entfernt ein (leeres) Level DIESES Stores
 //   PriceLevel* best() / const PriceLevel* best() const   nullptr wenn leer
 //   template <class F> void for_each(F&& f) const          bester zuerst; f(const PriceLevel&) -> bool
 //                                                           (false bricht ab)
