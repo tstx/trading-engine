@@ -53,6 +53,44 @@ bool crosses(const Order& aggressor, OrderType type, const Order& resting) noexc
     return aggressor.side == Side::Buy ? resting.price <= aggressor.price : resting.price >= aggressor.price;
 }
 
+// Matching-Schleife für einen Aggressor (NEW und MODIFY mit Prioritätsverlust).
+// Der Aggressor liegt währenddessen NICHT im Buch. Pro Match: TRADE, FILL(resting),
+// FILL(aggressor). Vollständig gefüllte resting Orders verlassen Buch, live_orders und Pool.
+// Danach entscheidet der Aufrufer über den Rest des Aggressors.
+template <typename Book>
+void match(Book& book, Order& aggressor, OrderType type, EventSink& sink, FlatHashMap<OrderId, Order*>& live_orders,
+           ObjectPool<Order>& orders) {
+    const bool buy = aggressor.side == Side::Buy;
+    while (aggressor.remaining > 0) {
+        Order* resting = buy ? book.best_ask() : book.best_bid();
+        if (resting == nullptr || !crosses(aggressor, type, *resting)) {
+            break;
+        }
+
+        const Quantity qty = std::min(aggressor.remaining, resting->remaining);
+        book.fill(resting, qty);
+        aggressor.remaining -= qty;
+        aggressor.filled += qty;
+
+        sink.on_trade(Trade{
+            .symbol = aggressor.symbol,
+            .price = resting->price,
+            .quantity = qty,
+            .buy_order_id = buy ? aggressor.id : resting->id,
+            .sell_order_id = buy ? resting->id : aggressor.id,
+            .aggressor = aggressor.side,
+        });
+        sink.on_fill(resting->id, qty, resting->remaining);
+        sink.on_fill(aggressor.id, qty, aggressor.remaining);
+
+        if (resting->remaining == 0) {
+            book.remove(resting);
+            live_orders.erase(resting->id);  // ID bleibt in known_ids_
+            orders.destroy(resting);
+        }
+    }
+}
+
 }  // namespace
 
 template <typename Book>
@@ -90,35 +128,7 @@ void BasicMatchingEngine<Book>::handle(const NewOrder& order) {
 
     sink_.on_ack(order.id, seq);
 
-    while (aggressor->remaining > 0) {
-        Order* resting = order.side == Side::Buy ? book.best_ask() : book.best_bid();
-        if (resting == nullptr || !crosses(*aggressor, order.type, *resting)) {
-            break;
-        }
-
-        const Quantity qty = std::min(aggressor->remaining, resting->remaining);
-        book.fill(resting, qty);
-        aggressor->remaining -= qty;
-        aggressor->filled += qty;
-
-        const bool buy = order.side == Side::Buy;
-        sink_.on_trade(Trade{
-            .symbol = order.symbol,
-            .price = resting->price,
-            .quantity = qty,
-            .buy_order_id = buy ? aggressor->id : resting->id,
-            .sell_order_id = buy ? resting->id : aggressor->id,
-            .aggressor = order.side,
-        });
-        sink_.on_fill(resting->id, qty, resting->remaining);
-        sink_.on_fill(aggressor->id, qty, aggressor->remaining);
-
-        if (resting->remaining == 0) {
-            book.remove(resting);
-            live_orders_.erase(resting->id);  // ID bleibt in known_ids_
-            orders_.destroy(resting);
-        }
-    }
+    match(book, *aggressor, order.type, sink_, live_orders_, orders_);
 
     if (aggressor->remaining == 0) {
         orders_.destroy(aggressor);
@@ -133,15 +143,68 @@ void BasicMatchingEngine<Book>::handle(const NewOrder& order) {
     book.add(aggressor);
 }
 
-// Stufe 3: CANCEL/MODIFY (siehe Header) — STUB.
+// FR-11: nur liegende Orders sind cancelbar; alles andere ist UNKNOWN_ORDER.
 template <typename Book>
 void BasicMatchingEngine<Book>::handle(const CancelOrder& cancel) {
-    sink_.on_reject(cancel.id, RejectReason::UnknownOrder);
+    Order* const* found = live_orders_.find(cancel.id);
+    if (found == nullptr) {
+        sink_.on_reject(cancel.id, RejectReason::UnknownOrder);
+        return;
+    }
+    Order* order = *found;
+    books_.find(order->symbol)->second->remove(order);
+    live_orders_.erase(cancel.id);  // ID bleibt in known_ids_
+    sink_.on_cancelled(cancel.id, order->remaining, CancelReason::User);
+    orders_.destroy(order);
 }
 
+// FR-12: Cancel/Replace. new_quantity ist die neue Gesamtmenge inkl. filled.
 template <typename Book>
 void BasicMatchingEngine<Book>::handle(const ModifyOrder& modify) {
-    sink_.on_reject(modify.id, RejectReason::UnknownOrder);
+    Order* const* found = live_orders_.find(modify.id);
+    if (found == nullptr) {
+        sink_.on_reject(modify.id, RejectReason::UnknownOrder);
+        return;
+    }
+    Order* order = *found;
+    if (modify.new_quantity <= order->filled) {
+        sink_.on_reject(modify.id, RejectReason::InvalidModify);
+        return;
+    }
+    Book& book = *books_.find(order->symbol)->second;
+    if (modify.new_price <= 0 || !book.accepts_price(modify.new_price)) {
+        sink_.on_reject(modify.id, RejectReason::InvalidPrice);
+        return;
+    }
+
+    const Quantity new_remaining = modify.new_quantity - order->filled;
+
+    // Reduktion (oder unveränderte Menge) bei gleichem Preis: Position bleibt, alte Seq.
+    if (modify.new_price == order->price && new_remaining <= order->remaining) {
+        if (new_remaining < order->remaining) {
+            book.reduce(order, new_remaining);
+        }
+        sink_.on_ack(modify.id, order->seq);
+        return;
+    }
+
+    // Prioritätsverlust: raus aus dem Buch, neue Seq, als LIMIT-Aggressor matchen.
+    // Die Order bleibt währenddessen in live_orders_ (sie liegt nicht im Buch und kann
+    // daher nicht mit sich selbst matchen).
+    book.remove(order);
+    order->price = modify.new_price;
+    order->remaining = new_remaining;
+    order->seq = next_seq_++;
+    sink_.on_ack(modify.id, order->seq);
+
+    match(book, *order, OrderType::Limit, sink_, live_orders_, orders_);
+
+    if (order->remaining == 0) {
+        live_orders_.erase(modify.id);  // ID bleibt in known_ids_
+        orders_.destroy(order);
+        return;
+    }
+    book.add(order);
 }
 
 template class BasicMatchingEngine<MapOrderBook>;
