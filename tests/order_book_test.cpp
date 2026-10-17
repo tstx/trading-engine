@@ -1,10 +1,11 @@
 // OrderBook direkt testen (ohne MatchingEngine).
 
-#include <gtest/gtest.h>
+#include "engine/order_book.hpp"
 
 #include <deque>
 
-#include "engine/order_book.hpp"
+#include <gtest/gtest.h>
+
 #include "engine/types.hpp"
 
 namespace {

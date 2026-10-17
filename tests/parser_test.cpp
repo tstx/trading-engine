@@ -1,10 +1,11 @@
-#include <gtest/gtest.h>
+#include "engine/parser.hpp"
 
 #include <string>
 #include <string_view>
 #include <variant>
 
-#include "engine/parser.hpp"
+#include <gtest/gtest.h>
+
 #include "engine/symbol_table.hpp"
 
 using namespace engine;
@@ -166,31 +167,31 @@ TEST_P(ParserErrorTest, IsParseError) {
 }
 
 INSTANTIATE_TEST_SUITE_P(Malformed, ParserErrorTest,
-                         ::testing::Values("FOO,1",                                 // unbekanntes Keyword
-                                           "new,1,ACME,BUY,LIMIT,1,1",              // Groß-/Kleinschreibung
-                                           "NEW",                                   // zu wenig Felder
-                                           "NEW,1,ACME,BUY,LIMIT,1",                // zu wenig Felder
-                                           "NEW,1,ACME,BUY,LIMIT,1,1,",             // zu viele Felder
-                                           "NEW,1,ACME,BUY,LIMIT,1,1,9,9,9",        // viel zu viele Felder
-                                           "NEW,x,ACME,BUY,LIMIT,1,1",              // id keine Zahl
-                                           "NEW,-1,ACME,BUY,LIMIT,1,1",             // id negativ
-                                           "NEW,+1,ACME,BUY,LIMIT,1,1",             // '+' nicht erlaubt
-                                           "NEW,1,,BUY,LIMIT,1,1",                  // leeres Symbol
-                                           "NEW,1,ACME,BUYY,LIMIT,1,1",             // Seite
-                                           "NEW,1,ACME,BUY,STOP,1,1",               // Typ
-                                           "NEW,1,ACME,BUY,LIMIT,,1",               // leerer Preis
-                                           "NEW,1,ACME,BUY,LIMIT,1.5,1",            // Dezimalpreis
-                                           "NEW,1,ACME,BUY,LIMIT,10 ,1",            // Whitespace
-                                           "NEW,1,ACME,BUY,LIMIT,1,-1",             // negative Menge
-                                           "NEW,1,ACME,BUY,LIMIT,1,1x",             // Müll am Ende
-                                           "CANCEL",                                // zu wenig Felder
-                                           "CANCEL,1,2",                            // zu viele Felder
-                                           "CANCEL,abc",                            // keine Zahl
-                                           "MODIFY,1,2",                            // zu wenig Felder
-                                           "MODIFY,1,2,3,4",                        // zu viele Felder
-                                           "MODIFY,1,a,3",                          // Preis
-                                           "MODIFY,1,2,-3",                         // Menge
-                                           "BOOK",                                  // zu wenig Felder
-                                           "BOOK,",                                 // leeres Symbol
-                                           "BOOK,ACME,1",                           // zu viele Felder
-                                           " NEW,1,ACME,BUY,LIMIT,1,1"));           // führendes Leerzeichen
+                         ::testing::Values("FOO,1",                           // unbekanntes Keyword
+                                           "new,1,ACME,BUY,LIMIT,1,1",        // Groß-/Kleinschreibung
+                                           "NEW",                             // zu wenig Felder
+                                           "NEW,1,ACME,BUY,LIMIT,1",          // zu wenig Felder
+                                           "NEW,1,ACME,BUY,LIMIT,1,1,",       // zu viele Felder
+                                           "NEW,1,ACME,BUY,LIMIT,1,1,9,9,9",  // viel zu viele Felder
+                                           "NEW,x,ACME,BUY,LIMIT,1,1",        // id keine Zahl
+                                           "NEW,-1,ACME,BUY,LIMIT,1,1",       // id negativ
+                                           "NEW,+1,ACME,BUY,LIMIT,1,1",       // '+' nicht erlaubt
+                                           "NEW,1,,BUY,LIMIT,1,1",            // leeres Symbol
+                                           "NEW,1,ACME,BUYY,LIMIT,1,1",       // Seite
+                                           "NEW,1,ACME,BUY,STOP,1,1",         // Typ
+                                           "NEW,1,ACME,BUY,LIMIT,,1",         // leerer Preis
+                                           "NEW,1,ACME,BUY,LIMIT,1.5,1",      // Dezimalpreis
+                                           "NEW,1,ACME,BUY,LIMIT,10 ,1",      // Whitespace
+                                           "NEW,1,ACME,BUY,LIMIT,1,-1",       // negative Menge
+                                           "NEW,1,ACME,BUY,LIMIT,1,1x",       // Müll am Ende
+                                           "CANCEL",                          // zu wenig Felder
+                                           "CANCEL,1,2",                      // zu viele Felder
+                                           "CANCEL,abc",                      // keine Zahl
+                                           "MODIFY,1,2",                      // zu wenig Felder
+                                           "MODIFY,1,2,3,4",                  // zu viele Felder
+                                           "MODIFY,1,a,3",                    // Preis
+                                           "MODIFY,1,2,-3",                   // Menge
+                                           "BOOK",                            // zu wenig Felder
+                                           "BOOK,",                           // leeres Symbol
+                                           "BOOK,ACME,1",                     // zu viele Felder
+                                           " NEW,1,ACME,BUY,LIMIT,1,1"));     // führendes Leerzeichen

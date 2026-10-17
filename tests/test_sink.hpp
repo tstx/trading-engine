@@ -4,11 +4,11 @@
 // Text-Format von plan.txt §4.1 auf; EngineFixture setzt SymbolTable, Engine
 // und Sink mit dem Symbol "ACME" auf.
 
-#include <gtest/gtest.h>
-
 #include <cstddef>
 #include <string>
 #include <vector>
+
+#include <gtest/gtest.h>
 
 #include "engine/event_sink.hpp"
 #include "engine/matching_engine.hpp"
@@ -59,8 +59,7 @@ public:
                          std::to_string(t.sell_order_id) + "," + std::string(to_string(t.aggressor)));
     }
     void on_fill(OrderId id, Quantity filled, Quantity remaining) override {
-        events.push_back("FILL," + std::to_string(id) + "," + std::to_string(filled) + "," +
-                         std::to_string(remaining));
+        events.push_back("FILL," + std::to_string(id) + "," + std::to_string(filled) + "," + std::to_string(remaining));
     }
     void on_cancelled(OrderId id, Quantity remaining, CancelReason reason) override {
         events.push_back("CANCELLED," + std::to_string(id) + "," + std::to_string(remaining) + "," +

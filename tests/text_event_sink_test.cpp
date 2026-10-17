@@ -1,9 +1,10 @@
-#include <gtest/gtest.h>
+#include "engine/text_event_sink.hpp"
 
 #include <sstream>
 
+#include <gtest/gtest.h>
+
 #include "engine/symbol_table.hpp"
-#include "engine/text_event_sink.hpp"
 
 using namespace engine;
 

@@ -502,8 +502,9 @@ TEST_F(MatchingTest, SnapshotRespectsDepth) {
         new_limit(static_cast<engine::OrderId>(1 + i), Side::Buy, 10000 - (10 * i), 1 + i);
         new_limit(static_cast<engine::OrderId>(101 + i), Side::Sell, 10100 + (10 * i), 10);
     }
-    EXPECT_EQ(book(5), "BOOK,ACME,BIDS:10000x1;9990x2;9980x3;9970x4;9960x5,"
-                       "ASKS:10100x10;10110x10;10120x10;10130x10;10140x10");
+    EXPECT_EQ(book(5),
+              "BOOK,ACME,BIDS:10000x1;9990x2;9980x3;9970x4;9960x5,"
+              "ASKS:10100x10;10110x10;10120x10;10130x10;10140x10");
     EXPECT_EQ(book(1), "BOOK,ACME,BIDS:10000x1,ASKS:10100x10");
     EXPECT_EQ(book(0), "BOOK,ACME,BIDS:,ASKS:");
 }
