@@ -16,6 +16,10 @@ public:
     virtual void on_trade(const Trade& trade) = 0;
     virtual void on_fill(OrderId id, Quantity filled, Quantity remaining) = 0;
     virtual void on_cancelled(OrderId id, Quantity remaining, CancelReason reason) = 0;
+
+    // Antwort auf eine BOOK-Abfrage. Kommt nicht von der MatchingEngine selbst, sondern
+    // von der CLI bzw. der Pipeline; Default ignoriert sie.
+    virtual void on_book(const BookSnapshot& /*snapshot*/) {}
 };
 
 }  // namespace engine

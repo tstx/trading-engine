@@ -1,8 +1,8 @@
-# Aufruf: cmake -DEXE=... -DINPUT=... -DEXPECTED=... -DOUTPUT=... -P run_replay.cmake
+# Aufruf: cmake -DEXE=... [-DARGS=...] -DINPUT=... -DEXPECTED=... -DOUTPUT=... -P run_replay.cmake
 get_filename_component(out_dir ${OUTPUT} DIRECTORY)
 file(MAKE_DIRECTORY ${out_dir})
 execute_process(
-    COMMAND ${EXE} ${INPUT}
+    COMMAND ${EXE} ${ARGS} ${INPUT}
     OUTPUT_FILE ${OUTPUT}
     RESULT_VARIABLE rc)
 if(NOT rc EQUAL 0)

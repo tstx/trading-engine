@@ -25,6 +25,8 @@ public:
     void on_fill(OrderId id, Quantity filled, Quantity remaining) override;
     void on_cancelled(OrderId id, Quantity remaining, CancelReason reason) override;
 
+    void on_book(const BookSnapshot& snapshot) override { write_book(snapshot); }
+
     void write_book(const BookSnapshot& snapshot);
 
 private:
