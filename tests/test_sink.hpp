@@ -1,15 +1,18 @@
 #pragma once
 
 // Test-Hilfen: RecordingSink zeichnet jedes Engine-Event als String im
-// Text-Format von plan.txt §4.1 auf; EngineFixture setzt SymbolTable, Engine
-// und Sink mit dem Symbol "ACME" auf.
+// Text-Format von plan.txt §4.1 auf; EngineFixture<Engine> setzt SymbolTable, Engine
+// und Sink mit dem Symbol "ACME" auf; EngineTypes/EngineTypeNames für TYPED_TESTs
+// über alle drei Engine-Varianten.
 
 #include <cstddef>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "engine/engine_config.hpp"
 #include "engine/event_sink.hpp"
 #include "engine/matching_engine.hpp"
 #include "engine/symbol_table.hpp"
@@ -79,12 +82,35 @@ private:
     const SymbolTable& symbols_;
 };
 
-// Fixture-Basis: Engine mit registriertem Symbol "ACME".
+// Die drei Engine-Varianten (Level-Struktur std::map / sortierter Vektor / Tick-Array).
+using EngineTypes = ::testing::Types<MapMatchingEngine, VectorMatchingEngine, TickMatchingEngine>;
+
+// Lesbare Namen für TYPED_TEST_SUITE: "Map", "Vector", "Tick".
+struct EngineTypeNames {
+    template <typename T>
+    static std::string GetName(int /*index*/) {
+        if constexpr (std::is_same_v<T, MapMatchingEngine>) {
+            return "Map";
+        } else if constexpr (std::is_same_v<T, VectorMatchingEngine>) {
+            return "Vector";
+        } else if constexpr (std::is_same_v<T, TickMatchingEngine>) {
+            return "Tick";
+        } else {
+            return "Unknown";
+        }
+    }
+};
+
+// Fixture-Basis: Engine (Variante Engine) mit registriertem Symbol "ACME".
+// In TYPED_TESTs sind die Member über this-> anzusprechen.
+template <typename Engine = MatchingEngine>
 class EngineFixture : public ::testing::Test {
 protected:
     static constexpr std::size_t kDepth = 100;
 
-    EngineFixture() : acme(symbols.add("ACME")) { engine.add_symbol(acme); }
+    explicit EngineFixture(const EngineConfig& config = {}) : acme(symbols.add("ACME")), engine{sink, config} {
+        engine.add_symbol(acme);
+    }
 
     void new_order(OrderId id, SymbolId symbol, Side side, OrderType type, Price price, Quantity qty) {
         engine.process(Command{NewOrder{id, symbol, side, type, price, qty}});
@@ -95,6 +121,10 @@ protected:
     void new_market(OrderId id, Side side, Quantity qty, Price price = 0) {
         new_order(id, acme, side, OrderType::Market, price, qty);
     }
+    void cancel(OrderId id) { engine.process(Command{CancelOrder{id}}); }
+    void modify(OrderId id, Price new_price, Quantity new_quantity) {
+        engine.process(Command{ModifyOrder{id, new_price, new_quantity}});
+    }
     [[nodiscard]] std::string book(std::size_t depth = kDepth) const {
         return book_line(symbols, engine.snapshot(acme, depth));
     }
@@ -103,7 +133,7 @@ protected:
     SymbolTable symbols;
     SymbolId acme;
     RecordingSink sink{symbols};
-    MatchingEngine engine{sink};
+    Engine engine;
 };
 
 }  // namespace engine::test
