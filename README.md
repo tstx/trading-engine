@@ -56,5 +56,31 @@ order 2. Trades execute at the resting price; the 102.00 level is never touched.
 - [x] Stage 1: core matching (LIMIT/MARKET), text parser, CLI, unit and replay tests.
 - [x] Stage 2: concurrency — lock-free MPMC input queue, engine and logger threads, SPSC event output,
   `--threaded` CLI mode, multi-producer stress test under TSan.
-- [ ] Stage 3: cancel/modify, memory pool, benchmarks.
+- [x] Stage 3: CANCEL/MODIFY, allocation-free hot path (object pool, open-addressing hash tables,
+  allocation-counting test), three price-level structures (std::map, sorted vector, tick array)
+  compared by benchmark; sorted vector is the default.
 - [ ] Stage 4: load generator, full documentation.
+
+## Performance
+
+Engine-internal, single-threaded, release build (GCC 15, Ryzen 7 5700X, WSL2). Preliminary numbers;
+method, raw results and caveats in [docs/benchmarks.md](docs/benchmarks.md).
+
+| Mixed flow, ~1,000 resting orders/side | Stage 1 (baseline) | Stage 3 (sorted vector) |
+|---|---:|---:|
+| Throughput | 9.0M orders/s | 7.2M orders/s |
+| Latency p50 | 140 ns | 140–150 ns |
+| Latency p99 | 0.54 µs | ~0.5 µs |
+| Latency max | 2–3.5 ms | 0.1–0.2 ms |
+| Heap allocations per order (steady state) | several | 0 |
+
+NFR-7 (>1M orders/s, p50 < 1 µs, p99 < 5 µs) is met by a wide margin. Stage 3 removed the
+millisecond outliers and all hot-path allocations; median throughput dropped because the new hash
+tables scatter sequential order IDs across memory (cache/TLB misses). A locality-preserving hash is
+the next optimisation (see docs/benchmarks.md).
+
+## Design notes
+
+- Order IDs stay reserved forever (duplicate detection, FR-2). Size `EngineConfig::id_capacity` for
+  the expected number of orders; beyond it the ID table doubles once, causing a single latency spike.
+

@@ -62,7 +62,8 @@ using MapOrderBook = BasicOrderBook<MapLevels>;
 using VectorOrderBook = BasicOrderBook<SortedVectorLevels>;
 using TickOrderBook = BasicOrderBook<TickArrayLevels>;
 
-// Standard-Variante; wird nach dem Benchmark-Vergleich in Stufe 3 festgelegt.
-using OrderBook = MapOrderBook;
+// Standard-Variante (Benchmark-Vergleich Stufe 3, docs/benchmarks.md): sortierter Vektor —
+// allokationsfrei, ohne Preisband. TickOrderBook nur für Instrumente mit engem, bekanntem Band.
+using OrderBook = VectorOrderBook;
 
 }  // namespace engine
