@@ -47,10 +47,17 @@ if(ENGINE_BUILD_TESTS)
     include(GoogleTest)
 
     file(GLOB ENGINE_TEST_SOURCES CONFIGURE_DEPENDS tests/*_test.cpp)
+    list(FILTER ENGINE_TEST_SOURCES EXCLUDE REGEX ".*/allocation_test\\.cpp$")
     add_executable(engine_tests ${ENGINE_TEST_SOURCES})
     target_include_directories(engine_tests PRIVATE tests)
     target_link_libraries(engine_tests PRIVATE engine_core engine_warnings GTest::gtest_main)
     gtest_discover_tests(engine_tests)
+
+    # NFR-6: eigenes Executable, weil allocation_test.cpp den globalen operator new/delete
+    # ersetzt (zählend); das soll die übrigen Tests nicht beeinflussen.
+    add_executable(allocation_tests tests/allocation_test.cpp)
+    target_link_libraries(allocation_tests PRIVATE engine_core engine_warnings GTest::gtest_main)
+    gtest_discover_tests(allocation_tests)
 
     # Replay-Tests: jedes tests/replay/<name>.in muss exakt <name>.expected ergeben (NFR-5),
     # single-threaded und über die Pipeline (--threaded).

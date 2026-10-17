@@ -12,35 +12,62 @@ BasicMatchingEngine<Book>::BasicMatchingEngine(EventSink& sink, const EngineConf
       live_orders_(config.order_capacity),
       known_ids_(config.id_capacity) {
     books_.reserve(config.symbol_capacity);
+    dense_books_.reserve(std::min<std::size_t>(config.symbol_capacity, kDenseSymbolLimit));
 }
 
 template <typename Book>
 BasicMatchingEngine<Book>::~BasicMatchingEngine() = default;
 
+// Außerhalb des heißen Pfads: darf allokieren (Buch, Vektor-/Tabellenwachstum).
 template <typename Book>
 void BasicMatchingEngine<Book>::add_symbol(SymbolId symbol) {
-    if (!books_.contains(symbol)) {
-        books_.emplace(symbol, std::make_unique<Book>(symbol, config_));
+    if (find_book(symbol) != nullptr) {
+        return;
     }
+    books_.reserve(books_.size() + 1);  // vor make_unique: kein Leck bei bad_alloc
+    auto book = std::make_unique<Book>(symbol, config_);
+    Book* raw = book.get();
+    if (symbol < kDenseSymbolLimit) {
+        if (symbol >= dense_books_.size()) {
+            dense_books_.resize(static_cast<std::size_t>(symbol) + 1, nullptr);
+        }
+        dense_books_[symbol] = raw;
+    } else {
+        sparse_books_.insert(symbol, raw);
+    }
+    books_.push_back(std::move(book));
+}
+
+template <typename Book>
+Book* BasicMatchingEngine<Book>::find_book(SymbolId symbol) const noexcept {
+    if (symbol < dense_books_.size()) [[likely]] {
+        return dense_books_[symbol];
+    }
+    if (symbol < kDenseSymbolLimit || sparse_books_.empty()) {
+        return nullptr;
+    }
+    Book* const* found = sparse_books_.find(symbol);
+    return found == nullptr ? nullptr : *found;
 }
 
 template <typename Book>
 bool BasicMatchingEngine<Book>::has_symbol(SymbolId symbol) const {
-    return books_.contains(symbol);
+    return find_book(symbol) != nullptr;
 }
 
 template <typename Book>
 void BasicMatchingEngine<Book>::process(const Command& cmd) {
+    // std::visit über drei Alternativen: Sprungtabelle, keine Allokation.
     std::visit([this](const auto& c) { this->handle(c); }, cmd);
 }
 
 template <typename Book>
 BookSnapshot BasicMatchingEngine<Book>::snapshot(SymbolId symbol, std::size_t depth) const {
-    auto it = books_.find(symbol);
-    if (it == books_.end()) {
+    const Book* book = find_book(symbol);
+    if (book == nullptr) {
         return BookSnapshot{symbol, {}, {}};
     }
-    return it->second->snapshot(depth);
+    return book->snapshot(depth);
 }
 
 namespace {
@@ -100,8 +127,8 @@ void BasicMatchingEngine<Book>::handle(const NewOrder& order) {
         sink_.on_reject(order.id, RejectReason::DuplicateId);
         return;
     }
-    auto book_it = books_.find(order.symbol);
-    if (book_it == books_.end()) {
+    Book* const book_ptr = find_book(order.symbol);
+    if (book_ptr == nullptr) {
         sink_.on_reject(order.id, RejectReason::UnknownSymbol);
         return;
     }
@@ -109,7 +136,7 @@ void BasicMatchingEngine<Book>::handle(const NewOrder& order) {
         sink_.on_reject(order.id, RejectReason::InvalidQuantity);
         return;
     }
-    Book& book = *book_it->second;
+    Book& book = *book_ptr;
     if (order.type == OrderType::Limit && (order.price <= 0 || !book.accepts_price(order.price))) {
         sink_.on_reject(order.id, RejectReason::InvalidPrice);
         return;
@@ -152,7 +179,7 @@ void BasicMatchingEngine<Book>::handle(const CancelOrder& cancel) {
         return;
     }
     Order* order = *found;
-    books_.find(order->symbol)->second->remove(order);
+    find_book(order->symbol)->remove(order);
     live_orders_.erase(cancel.id);  // ID bleibt in known_ids_
     sink_.on_cancelled(cancel.id, order->remaining, CancelReason::User);
     orders_.destroy(order);
@@ -171,7 +198,7 @@ void BasicMatchingEngine<Book>::handle(const ModifyOrder& modify) {
         sink_.on_reject(modify.id, RejectReason::InvalidModify);
         return;
     }
-    Book& book = *books_.find(order->symbol)->second;
+    Book& book = *find_book(order->symbol);
     if (modify.new_price <= 0 || !book.accepts_price(modify.new_price)) {
         sink_.on_reject(modify.id, RejectReason::InvalidPrice);
         return;
