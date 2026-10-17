@@ -56,9 +56,11 @@ private:
     std::unique_ptr<EventQueue> events_;
     std::thread engine_thread_;
     std::thread logger_thread_;
+    // Shutdown-Protokoll (siehe pipeline.cpp): stop() -> stop_requested_ (release)
+    // -> Engine leert requests_ -> engine_done_ (release) -> Logger leert events_.
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> engine_done_{false};
-    bool running_{false};
+    bool running_{false};  // nur vom steuernden Thread (start/stop/Destruktor) benutzt
 };
 
 }  // namespace engine
